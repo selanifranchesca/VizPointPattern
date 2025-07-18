@@ -1,11 +1,29 @@
 Package: VizPointPattern
-Title: What the Package Does (One Line, Title Case)
+Title: Visualize Point Patterns
 Version: 0.0.0.9000
 Authors@R: 
-    person("First", "Last", , "first.last@example.com", role = c("aut", "cre"))
-Description: What the package does (one paragraph).
-License: `use_mit_license()`, `use_gpl3_license()` or friends to pick a
-    license
+    person("Selani", "Thomas", , "selanifthomas@gmail.com", role = c("aut", "cre"))
+Description: This package provides tools for loading, cleaning, geocoding,
+    and spatially analyzing water sample data or contamination data.
+License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.2
+Imports:
+    readxl,
+    dplyr,
+    tidyr,
+    sf,
+    leaflet,
+    RColorBrewer,
+    sp,
+    spdep,
+    tidygeocoder,
+    ggplot2,
+    purrr,
+    rlang,
+    magrittr,
+    methods
+Suggests:
+    knitr,
+    rmarkdown
