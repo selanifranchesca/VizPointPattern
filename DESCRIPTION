@@ -27,3 +27,5 @@ Imports:
 Suggests:
     knitr,
     rmarkdown
+URL: https://github.com/selanifranchesca/VizPointPattern
+BugReports: https://github.com/selanifranchesca/VizPointPattern/issues
