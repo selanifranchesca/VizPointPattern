@@ -1,0 +1,359 @@
+---
+title: "Flint_Michigan_VizPointPattern"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Flint_Michigan_VizPointPattern}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r setup}
+library(VizPointPattern)
+```
+
+
+Understanding Lead Contamination Patterns in Flint, Michigan (2016)
+
+Introduction:
+This vignette demonstrates a spatial analysis workflow for understanding the distribution of lead in water samples collected during the Flint, Michigan Water Crisis in 2016. We will cover data loading, cleaning, geocoding, and advanced spatial visualization techniques, including heatmaps and raster-based concentration mapping. We'll also perform a basic spatial autocorrelation analysis using Moran's I to assess the clustering of lead levels.
+
+The dataset contains 22,672 water quality measurements from residential and sentinel sites in Flint, collected between January 1, 2016, and October 13, 2016. The goal is to identify spatial patterns and potential "hotspots" of lead contamination.
+
+Setup and Data Loading
+First, we load the necessary R packages. These packages facilitate data manipulation, spatial operations, geocoding, and interactive mapping.
+
+
+```{r setup_packages, include=TRUE}
+# Set a CRAN mirror to avoid the "trying to use CRAN without setting a mirror" error
+options(repos = c(CRAN = "[https://cran.rstudio.com/](https://cran.rstudio.com/)"))
+
+# Define the list of packages
+
+list.of.packages <- c(
+  "sf",
+  "dplyr",
+  "tidyr",
+  "leaflet",
+  "RColorBrewer",
+  "spdep",
+  "tidygeocoder",
+  "readxl",
+  "leaflet.extras", 
+  "terra"           
+)
+
+# Check for and install missing packages
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages) # Ensure this line is NOT commented out!
+
+# Load all required packages
+lapply(list.of.packages, function(x) {
+       require(x, character.only = TRUE, quietly = TRUE)
+})
+
+# Note on Warnings:
+# You mentioned warnings about 'maptools', 'rgeos', 'rgdal', 'ggsn' not being available.
+# These packages are often being superseded by 'sf' and 'terra'.
+# If you don't explicitly use functions from them, you might consider removing them
+# from your `list.of.packages` to avoid the warnings.
+# 'ggsn' is for scale bars and north arrows in ggplot2, which you're not using directly
+# in leaflet.
+# For 'tmap' being built under a newer R version, it's usually just a warning unless
+# it causes functionality issues.
+
+```
+
+# Load the 2016 water sample data
+
+```{r}
+excel_path <- system.file("extdata", "Test_Results_Flint_Jul-Dec_2016.xlsx", package = "VizPointPattern")
+samples_2016_df_raw <- readxl::read_excel(excel_path, sheet = "Sorted by Lead Concentration")
+```
+
+# Data Cleaning and Preparation
+The raw data requires several cleaning steps: dropping irrelevant columns, renaming columns for clarity, removing null values, and uniting address components for geocoding.
+
+
+```{r clean_data}
+# 1. Select relevant columns and immediately rename them to clean, R-friendly names.
+# This ensures consistency from the start.
+samples_2016_cleaned <- samples_2016_df_raw %>%
+  dplyr::select(
+    `Sample Number`,
+    `Date Submitted`,
+    # Select the specific lead concentration column that matches your data output:
+    `1 Liter Calculated (PPB)...6`, # This is the lead concentration column you want
+    `Street #`,
+    `Street Name`,
+    `City`,
+    `Zip Code`
+    # If your original data has 'x' and 'y' columns that you want to use for initial
+    # SF conversion before geocoding, include them here as well.
+    # e.g., x_coord = x, y_coord = y
+  ) %>%
+  dplyr::rename(
+    sample_number = `Sample Number`, # Renaming column with space
+    date_submitted = `Date Submitted`,
+    # Renaming the specific lead column
+    lead_calculated_ppb = `1 Liter Calculated (PPB)...6`,
+    street_number = `Street #`,
+    street_name = `Street Name`,
+    city = `City`,
+    zip_code = `Zip Code`
+  )
+
+# 2. Handle "Not Detected" and convert the relevant PPB column to numeric
+samples_2016_cleaned <- samples_2016_cleaned %>%
+  dplyr::mutate(
+    lead_calculated_ppb = as.numeric(gsub("Not Detected", "0", as.character(lead_calculated_ppb)))
+  ) %>%
+  # Filter for valid address components AFTER initial cleanup
+  dplyr::filter(
+    !is.na(street_number), street_number != "",
+    !is.na(street_name), street_name != "",
+    !is.na(city), city != "",
+    !is.na(zip_code), zip_code != ""
+  )
+
+# 3. Unite address components into a single column for geocoding
+Flint_samples_2016_for_geocoding <- samples_2016_cleaned %>%
+  tidyr::unite(full_address, street_number, street_name, city, zip_code,
+               sep = " ", remove = FALSE, na.rm = TRUE) # Keep individual components for reference
+
+# --- DIAGNOSTIC LINES ---
+print("Number of rows in Flint_samples_2016_for_geocoding after initial cleaning:")
+print(nrow(Flint_samples_2016_for_geocoding))
+print("Head of Flint_samples_2016_for_geocoding after cleaning and before geocoding:")
+print(head(Flint_samples_2016_for_geocoding))
+print("Column names of Flint_samples_2016_for_geocoding before geocoding:")
+print(colnames(Flint_samples_2016_for_geocoding))
+# --- END DIAGNOSTIC LINES ---
+```
+
+# Geocoding Addresses
+To plot the data spatially, we need to convert addresses into geographic coordinates (latitude and longitude). The tidygeocoder package with the 'osm' (OpenStreetMap) method is used for this purpose.
+
+```{r}
+# Geocode addresses to get latitude and longitude
+# This step can take some time depending on the number of addresses.
+geocoded_samples_df <- Flint_samples_2016_for_geocoding %>%
+  tidygeocoder::geocode(address = full_address, method = 'osm', lat = latitude, long = longitude, verbose = FALSE)
+
+# Filter out rows where geocoding failed (latitude or longitude are NA)
+geocoded_samples_df_filtered <- geocoded_samples_df %>%
+  dplyr::filter(!is.na(latitude) & !is.na(longitude))
+
+# Convert to an sf object for all subsequent spatial operations.
+# This will be the main 'sf' object used throughout the rest of the script.
+Flint_samples_2016_sf <- geocoded_samples_df_filtered %>%
+  sf::st_as_sf(coords = c('longitude', 'latitude'), crs = 4326) # Use CRS 4326 (WGS84) for Leaflet compatibility
+
+# Filter out NA values for the lead concentration AFTER geocoding and SF conversion
+# This ensures that only points with valid lead data are used for mapping and analysis.
+Flint_samples_2016_sf <- Flint_samples_2016_sf %>%
+  dplyr::filter(!is.na(lead_calculated_ppb)) %>%
+  # Optionally rename to a shorter name for the primary analysis variable
+  dplyr::rename(lead_ppb = lead_calculated_ppb)
+
+
+# Final check on the SF object used for mapping
+print("Column names after geocoding and final SF conversion:")
+print(colnames(Flint_samples_2016_sf))
+print(summary(Flint_samples_2016_sf$lead_ppb))
+if(inherits(Flint_samples_2016_sf, "sf")) {
+  print("Flint_samples_2016_sf is successfully an sf object after geocoding.")
+} else {
+  print("ERROR: Flint_samples_2016_sf is NOT an sf object after geocoding. Check geocoding output.")
+}
+print(head(Flint_samples_2016_sf))
+```
+
+#Initial Data Visualization: Interactive Map with Lead Levels
+An initial interactive map using leaflet helps visualize the distribution of samples and their associated lead levels. We'll use a color palette to represent lead concentrations.
+
+```{r}
+# Define a color palette for lead levels (Yellow to Red)
+pal <- leaflet::colorNumeric(
+  palette = "YlOrRd",
+  domain = Flint_samples_2016_sf$lead_ppb, # Use the new, consistent 'lead_ppb' name
+  na.color = "transparent"
+)
+
+# Build leaflet map with circle markers
+leaflet(data = Flint_samples_2016_sf) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    radius = 5,
+    color = ~pal(lead_ppb), # Use the new, consistent 'lead_ppb' name
+    stroke = FALSE,
+    fillOpacity = 0.8,
+    label = ~paste("Sample:", sample_number, # Use the new, consistent 'sample_number' name
+                   "<br>PPB:", lead_ppb), # Use the new, consistent 'lead_ppb' name
+    group = "Individual Sample Points"
+  ) %>%
+  addLegend(
+    "bottomright",
+    pal = pal,
+    values = ~lead_ppb, # Use the new, consistent 'lead_ppb' name
+    title = "Lead (PPB)",
+    opacity = 0.7,
+    labFormat = labelFormat(suffix = " ppb"),
+    className = "small-legend"
+  ) %>%
+  addScaleBar(position = "bottomleft") %>%
+  addEasyButton(easyButton(
+    icon = "fa-globe", title = "Reset View",
+    onClick = JS("function(btn, map){ map.setView([43.03, -83.69], 12); }") # Centered on Flint
+  ))
+```
+
+# Refined Data Visualization and Hotspot Analysis
+```{r}
+# Step 1: Filter Data to Flint Boundaries
+# Approximate boundaries for Flint, Michigan
+flint_lat_min <- 42.99
+flint_lat_max <- 43.08
+flint_lon_min <- -83.82
+flint_lon_max <- -83.62
+
+# Directly filter the sf object created AFTER geocoding
+# Access coordinates using sf::st_coordinates() for filtering
+lat_longs_filtered <- Flint_samples_2016_sf %>%
+  dplyr::filter(
+    sf::st_coordinates(.)[, "Y"] >= flint_lat_min, # "Y" for Latitude
+    sf::st_coordinates(.)[, "Y"] <= flint_lat_max,
+    sf::st_coordinates(.)[, "X"] >= flint_lon_min, # "X" for Longitude
+    sf::st_coordinates(.)[, "X"] <= flint_lon_max
+  )
+
+if (nrow(lat_longs_filtered) == 0) {
+  warning("No valid data remaining after filtering by Flint boundaries. Check your data or filter ranges.")
+} else {
+  message(paste("Number of samples after filtering to Flint boundaries:", nrow(lat_longs_filtered)))
+}
+
+# Step 2: Create Interactive Heatmap and Raster Overlay
+# Recalculate color palette for the filtered data for consistent visualization
+pal_filtered <- leaflet::colorNumeric(
+  palette = "YlOrRd",
+  domain = range(lat_longs_filtered$lead_ppb, na.rm = TRUE),
+  na.color = "transparent"
+)
+
+## Interactive Heatmap with leaflet.extras
+leaflet(data = lat_longs_filtered) %>%
+  addTiles() %>%
+  addHeatmap(
+    intensity = ~lead_ppb, # Use the consistent 'lead_ppb' name
+    blur = 20, # Adjust for desired blurriness of hotspots
+    max = max(lat_longs_filtered$lead_ppb, na.rm = TRUE), # Set max intensity for scaling
+    radius = 15, # Adjust for desired size of heatmap points
+    group = "Lead Concentration Heatmap (Leaflet)"
+  ) %>%
+  addCircleMarkers(
+    radius = 5,
+    color = ~pal_filtered(lead_ppb), # Use the consistent 'lead_ppb' name
+    stroke = FALSE,
+    fillOpacity = 0.8,
+    label = ~paste("Sample:", sample_number, "<br>PPB:", lead_ppb), # Use sample_number and lead_ppb
+    group = "Individual Sample Points"
+  ) %>%
+  addLegend(
+    "bottomright",
+    pal = pal_filtered,
+    values = ~lead_ppb, # Use the consistent 'lead_ppb' name
+    title = "Lead (PPB)",
+    opacity = 0.7,
+    labFormat = labelFormat(suffix = " ppb"),
+    className = "small-legend"
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("Lead Concentration Heatmap (Leaflet)", "Individual Sample Points"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  addScaleBar(position = "bottomleft") %>%
+  addEasyButton(easyButton(
+    icon = "fa-globe", title = "Reset View",
+    onClick = JS("function(btn, map){ map.setView([43.03, -83.69], 12); }") # Centered on Flint
+  ))
+```
+
+
+# Calculate Moran's I Statistic
+```{r}
+message("\n--- Calculating Moran's I ---")
+
+# Extract coordinates from the sf object
+coords <- sf::st_coordinates(lat_longs_filtered)
+
+# Check if there are enough points after filtering for Moran's I
+if (nrow(coords) < 2) {
+  stop("Not enough points in the filtered data to calculate spatial weights for Moran's I. Moran's I calculation halted.")
+}
+
+# Create a k-nearest neighbors list
+# Ensure k is not greater than the number of available points minus 1
+nb <- spdep::knearneigh(coords, k = min(8, nrow(coords) - 1), longlat = TRUE)
+nb_list <- spdep::knn2nb(nb)
+
+# Check for isolated points
+if (any(spdep::card(nb_list) == 0)) {
+  warning("Some points have no neighbors. Consider adjusting 'k' or using a different neighborhood definition for Moran's I.")
+}
+
+# Create spatial weights list from neighborhood list
+listw <- spdep::nb2listw(nb_list, style = "W", zero.policy = TRUE)
+
+# Extract lead values
+ppb_values <- lat_longs_filtered$lead_ppb # Use the consistent 'lead_ppb' name
+
+# Perform Moran's I test for positive spatial autocorrelation
+moran_result <- spdep::moran.test(ppb_values, listw, alternative = "greater", zero.policy = TRUE)
+
+print(moran_result)
+
+cat("\n--- Interpretation of Moran's I ---\n")
+cat("Moran's I ranges from -1 to 1:\n")
+cat("  - Values close to 1: Indicate strong positive spatial autocorrelation (clustering of similar values).\n")
+cat("  - Values close to -1: Indicate strong negative spatial autocorrelation (dispersed pattern, high values next to low values).\n")
+cat("  - Values close to 0: Indicate a random spatial pattern (no spatial autocorrelation).\n")
+cat("\n")
+cat(sprintf("Observed Moran's I: %.4f\n", moran_result$estimate[1]))
+cat(sprintf("Expected Moran's I (under randomness): %.4f\n", moran_result$estimate[2]))
+cat(sprintf("P-value: %.4f\n", moran_result$p.value))
+
+if (moran_result$p.value < 0.05 && moran_result$estimate[1] > moran_result$estimate[2]) {
+  cat("The p-value (", format(moran_result$p.value, digits=2), ") is less than 0.05 and the observed Moran's I is greater than the expected value.\n")
+  cat("This suggests a statistically significant **positive spatial autocorrelation** (clustering) of lead concentrations.\n")
+} else if (moran_result$p.value < 0.05 && moran_result$estimate[1] < moran_result$estimate[2]) {
+  cat("The p-value (", format(moran_result$p.value, digits=2), ") is less than 0.05 and the observed Moran's I is less than the expected value.\n")
+  cat("This suggests a statistically significant **negative spatial autocorrelation** (dispersion) of lead concentrations.\n")
+} else {
+  cat("The p-value (", format(moran_result$p.value, digits=2), ") is not significant (>= 0.05).\n")
+  cat("There is no statistically significant spatial autocorrelation; the pattern appears to be random.\n")
+}
+```
+
+
+  
+# Summary and Next Steps
+The visualizations provided in this vignette, particularly the raster-based heatmap, offer insights into the spatial patterns of lead contamination in Flint's water samples. The Moran's I statistic provides a quantitative measure of this spatial pattern. A statistically significant positive Moran's I suggests that areas with high lead levels tend to be clustered together, and similarly for low lead levels.
+
+This analysis serves as a foundational step. Future work could include:
+
+Temporal Analysis: Analyzing changes in lead levels over time.
+
+Regression Analysis: Exploring relationships between lead levels and other variables (e.g., housing age, pipe materials, socio-economic factors) using spatial regression models.
+
+More Advanced Interpolation: Employing methods like Kriging for more robust spatial prediction.
+
+Hotspot and Coldspot Analysis (Getis-Ord Gi*): Identifying statistically significant clusters of high or low values.
+
+This vignette demonstrates how VizPointPattern functions (or their equivalents in packages like leaflet and raster) combined with spatial autocorrelation statistics can provide valuable insights into environmental data patterns.

@@ -23,9 +23,12 @@ Imports:
     purrr,
     rlang,
     magrittr,
-    methods
+    methods,
+    leaflet.extras, 
+    terra           
 Suggests:
     knitr,
     rmarkdown
 URL: https://github.com/selanifranchesca/VizPointPattern
 BugReports: https://github.com/selanifranchesca/VizPointPattern/issues
+VignetteBuilder: knitr
